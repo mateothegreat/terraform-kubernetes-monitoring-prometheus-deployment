@@ -1,24 +1,8 @@
-provider "kubernetes" {
-
-    host     = var.host
-    token    = var.token
-    insecure = var.insecure
-
-}
-
-provider "kubernetes-alpha" {
-
-    host     = var.host
-    token    = var.token
-    insecure = var.insecure
-
-}
-
 resource "kubernetes_secret" "config" {
 
     metadata {
 
-        namespace = "monitoring"
+        namespace = var.namespace
         name      = "thanos-objstore-config"
 
     }
@@ -46,6 +30,8 @@ resource "kubernetes_secret" "config" {
 
 resource "kubernetes_manifest" "promethus-deployment" {
 
+    #    depends_on = [ kubernetes_secret.config, kubernetes_service.thanose-sidecar ]
+
     provider = kubernetes-alpha
 
     manifest = {
@@ -55,30 +41,35 @@ resource "kubernetes_manifest" "promethus-deployment" {
 
         metadata = {
 
-            namespace = "monitoring"
-            name      = "k8s"
+            namespace = var.namespace
+            name      = var.name
 
         }
 
         spec = {
 
-            image              = "quay.io/prometheus/prometheus:v2.20.0"
+            image              = "quay.io/prometheus/prometheus:${ var.prometheus_version }"
             replicas           = 1
             serviceAccountName = "prometheus-k8s"
-            version            = "v2.20.0"
-
-            nodeSelector = {
-
-                role = "services"
-
-            }
+            version            = var.prometheus_version
+            name               = var.name
+            namespace          = var.namespace
+            nodeSelector       = var.prometheus_node_selector
+            scrapeInterval     = var.prometheus_scrape_interval
 
             resources = {
 
                 requests = {
 
-                    memory = "200Mi"
-                    cpu    = "1000m"
+                    memory = var.prometheus_request_memory
+                    cpu    = var.prometheus_request_cpu
+
+                }
+
+                limits = {
+
+                    memory = var.prometheus_limit_memory
+                    cpu    = var.prometheus_limit_cpu
 
                 }
 
@@ -96,7 +87,7 @@ resource "kubernetes_manifest" "promethus-deployment" {
 
                             requests = {
 
-                                storage = "40Gi"
+                                storage = var.prometheus_storage
 
                             }
 
@@ -134,13 +125,10 @@ resource "kubernetes_manifest" "promethus-deployment" {
 
             }
 
-            externalLabels = {
-
-                cluster     = var.cluster_name
-                product     = var.product_name
-                environment = var.environment_name
-
-            }
+            #
+            # External labels only apply when querying thanos externally.
+            #
+            externalLabels = var.external_labels
 
             thanos = {
 
@@ -184,12 +172,14 @@ resource "kubernetes_manifest" "promethus-deployment" {
 
 }
 
-resource "kubernetes_service" "thanose-sidecar" {
+resource "kubernetes_service" "prometheus-ui" {
+
+    count = var.prometheus_loadbalancer_enabled ? 1 : 0
 
     metadata {
 
-        namespace = "monitoring"
-        name = "thanos-sidecar"
+        namespace = var.namespace
+        name      = "${ var.name }-prometheus"
 
         labels = {
 
@@ -199,8 +189,8 @@ resource "kubernetes_service" "thanose-sidecar" {
 
         annotations = {
 
-            "service.beta.kubernetes.io/aws-load-balancer-type" = "nlb"
-            "service.beta.kubernetes.io/aws-load-balancer-internal" = true
+            "service.beta.kubernetes.io/aws-load-balancer-type"     = "nlb"
+            "service.beta.kubernetes.io/aws-load-balancer-internal" = var.prometheus_loadbalancer_internal ? "true" : null
 
         }
 
@@ -218,16 +208,62 @@ resource "kubernetes_service" "thanose-sidecar" {
 
         port {
 
-            name = "grpc"
-            port = 10901
+            name        = "http"
+            port        = 9090
+            target_port = "9090"
+
+        }
+
+    }
+
+}
+
+resource "kubernetes_service" "thanose-sidecar" {
+
+    count = var.thanos_loadbalancer_enabled ? 1 : 0
+
+    metadata {
+
+        namespace = var.namespace
+        name      = "${ var.name }-thanos-sidecar"
+
+        labels = {
+
+            app = "prometheus"
+
+        }
+
+        annotations = {
+
+            "service.beta.kubernetes.io/aws-load-balancer-type"     = "nlb"
+            "service.beta.kubernetes.io/aws-load-balancer-internal" = var.thanos_loadbalancer_internal ? "true" : null
+
+        }
+
+    }
+
+    spec {
+
+        type = "LoadBalancer"
+
+        selector = {
+
+            app = "prometheus"
+
+        }
+
+        port {
+
+            name        = "grpc"
+            port        = 10901
             target_port = "grpc"
 
         }
 
         port {
 
-            name = "http"
-            port = 10902
+            name        = "http"
+            port        = 10902
             target_port = "http"
 
         }
